@@ -11,7 +11,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-# a flagged progress line reaches the person, so they come at most this often
+# a flagged progress line reaches the person: a turn's first goes at once, as its ack, and the
+# rest come at most this often
 PROGRESS_INTERVAL = 20.0
 
 
@@ -84,7 +85,7 @@ class Session:
     async def prompt(self, text: str) -> None:
         while not self.events.empty():
             self.events.get_nowait()
-        self.last_flagged = time.monotonic()
+        self.last_flagged = 0.0
         await herdr("agent", "prompt", self.name, text)
 
     async def interrupt(self) -> None:

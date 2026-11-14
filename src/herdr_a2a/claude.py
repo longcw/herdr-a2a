@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -9,6 +10,8 @@ from .session import Session, Sessions
 
 # a question hook waits on a person, who can take a while to answer
 ASK_TIMEOUT = 3600
+# how long a finished message waits for the Stop that makes it the answer, in seconds
+SETTLE = 1.0
 ASK_TOOL = "AskUserQuestion"
 # words that approve a permission; any other answer denies it and Claude reads the words
 ALLOW = {"yes", "y", "yeah", "yep", "sure", "ok", "okay", "allow", "approve", "go", "do it"}
@@ -42,8 +45,22 @@ def describe(tool: str, tool_input: dict[str, Any]) -> str:
 class Hooks:
     def __init__(self, sessions: Sessions) -> None:
         self._sessions = sessions
-        # per session, the assistant message shown so far: progress once a tool call follows it
+        # per session, the assistant message shown so far
         self._shown: dict[str, list[str]] = {}
+        # per session, a finished message waiting to become progress unless Stop makes it the answer
+        self._settling: dict[str, asyncio.Task[None]] = {}
+
+    def _flush(self, session: Session) -> None:
+        """The message shown so far, as progress a person hears."""
+        if task := self._settling.pop(session.session_id, None):
+            task.cancel()
+        if text := "".join(self._shown.pop(session.session_id, [])).strip():
+            session.progress(text, flagged=True)
+
+    async def _settle(self, session: Session) -> None:
+        await asyncio.sleep(SETTLE)
+        self._settling.pop(session.session_id, None)
+        self._flush(session)
 
     async def handle(self, payload: dict[str, Any]) -> dict[str, Any]:
         session = self._sessions.by_session_id(payload.get("session_id", ""))
@@ -51,14 +68,17 @@ class Hooks:
             return {}
         event = payload.get("hook_event_name")
         if event == "MessageDisplay":
+            # a message can show before or after its tool call starts, so a finished one waits
+            # briefly for the Stop that would make it the answer
             if payload.get("index") == 0:
-                self._shown[session.session_id] = []
+                self._flush(session)
             self._shown.setdefault(session.session_id, []).append(payload.get("delta", ""))
+            if payload.get("final", True):
+                self._settling[session.session_id] = asyncio.create_task(self._settle(session))
             return {}
         if event == "PreToolUse":
             tool, tool_input = payload.get("tool_name", ""), payload.get("tool_input") or {}
-            if text := "".join(self._shown.pop(session.session_id, [])).strip():
-                session.progress(text, flagged=True)
+            self._flush(session)
             if tool == ASK_TOOL:
                 return await self._ask_user(session, tool_input)
             session.progress(describe(tool, tool_input))
@@ -70,6 +90,8 @@ class Hooks:
         if event == "PermissionRequest":
             return await self._permission(session, payload)
         if event == "Stop":
+            if task := self._settling.pop(session.session_id, None):
+                task.cancel()
             self._shown.pop(session.session_id, None)
             session.done(payload.get("last_assistant_message") or "")
         return {}

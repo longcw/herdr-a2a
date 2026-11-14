@@ -4,7 +4,7 @@ import uuid
 import httpx
 import pytest
 
-from herdr_a2a import server, session
+from herdr_a2a import claude, server, session
 
 
 @pytest.fixture
@@ -65,25 +65,31 @@ def texts(task, flagged):
     ]
 
 
-async def test_a_turn_streams_steps_flags_what_claude_says_and_answers_with_its_last_message(
+async def test_a_turn_streams_steps_flags_its_opening_line_and_answers_with_its_last_message(
     herdr, client, monkeypatch
 ):
-    monkeypatch.setattr(session, "PROGRESS_INTERVAL", 0)
+    monkeypatch.setattr(claude, "SETTLE", 0.01)
     calls, prompted = herdr
     sending = asyncio.create_task(send(client, "fix the test", context_id="c1"))
     assert await prompted.get() == "fix the test"
     sid = session_id(calls)
-    await hook(client, sid, "PreToolUse", tool_name="Read", tool_input={"file_path": "a.py"})
-    await hook(client, sid, "MessageDisplay", index=0, final=True, delta="Found it.\n")
-    await hook(client, sid, "PreToolUse", tool_name="Bash", tool_input={"command": "pytest"})
+    # Claude Code shows a message once its tool call has started
+    for tool, tool_input, line in [
+        ("Read", {"file_path": "a.py"}, "I'll look.\n"),
+        ("Bash", {"command": "pytest"}, "Found it.\n"),
+    ]:
+        await hook(client, sid, "PreToolUse", tool_name=tool, tool_input=tool_input)
+        await hook(client, sid, "MessageDisplay", index=0, final=True, delta=line)
+        await asyncio.sleep(0.05)
     await hook(client, sid, "MessageDisplay", index=0, final=True, delta="Fixed.\n")
     await hook(client, sid, "Stop", last_assistant_message="Fixed.")
     task = await sending
 
     assert task["status"]["state"] == "TASK_STATE_COMPLETED"
     assert task["artifacts"][0]["parts"][0]["text"] == "Fixed."
-    assert texts(task, flagged=True) == ["Found it."]
-    assert texts(task, flagged=False) == ["Read: a.py", "Bash: pytest"]
+    # the opening line goes at once; the next, within the interval, only to who reads steps
+    assert texts(task, flagged=True) == ["I'll look."]
+    assert texts(task, flagged=False) == ["Read: a.py", "Bash: pytest", "Found it."]
 
 
 async def test_a_question_is_input_required_and_its_answer_reaches_claude(herdr, client):

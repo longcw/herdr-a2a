@@ -7,7 +7,7 @@ The sessions are the plain `claude` CLI on your own login. Their [hooks](https:/
 | Claude Code hook | A2A |
 |---|---|
 | `PreToolUse` | `working` status, one line per tool call |
-| `MessageDisplay` text a tool call follows | `working` status flagged `livekit/progress`, at most one per 20 s |
+| `MessageDisplay` text that is not the answer | `working` status flagged `livekit/progress`: a turn's first line at once, then at most one per 20 s |
 | `TaskCompleted` | `working` status flagged `livekit/progress` |
 | `PreToolUse` on `AskUserQuestion` | `input-required`; the answer returns to Claude as the tool's `answers` |
 | `PermissionRequest` | `input-required`; yes allows, any other answer denies and Claude reads it |
