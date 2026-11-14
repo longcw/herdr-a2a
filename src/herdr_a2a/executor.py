@@ -25,6 +25,9 @@ class SessionExecutor(AgentExecutor):
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         task_id, context_id = context.task_id, context.context_id
+        if context.current_task is not None:
+            # a message that names its task belongs to that task's context, named or not
+            context_id = context.current_task.context_id
         assert task_id is not None and context_id is not None
         updater = TaskUpdater(event_queue, task_id, context_id)
         text = context.get_user_input()

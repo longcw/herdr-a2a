@@ -40,9 +40,10 @@ def session_id(herdr_calls) -> str:
     return start[start.index("--session-id") + 1]
 
 
-async def send(client, text, *, context_id, task_id=None):
+async def send(client, text, *, context_id=None, task_id=None):
     message = {"messageId": uuid.uuid4().hex, "role": "ROLE_USER", "parts": [{"text": text}]}
-    message["contextId"] = context_id
+    if context_id:
+        message["contextId"] = context_id
     if task_id:
         message["taskId"] = task_id
     body = {"jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {"message": message}}
@@ -104,7 +105,7 @@ async def test_a_question_is_input_required_and_its_answer_reaches_claude(herdr,
     assert task["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
     assert task["status"]["message"]["parts"][0]["text"] == "Which name? (fast, quick)"
 
-    answering = asyncio.create_task(send(client, "quick", context_id="c1", task_id=task["id"]))
+    answering = asyncio.create_task(send(client, "quick", task_id=task["id"]))
     output = (await asking)["hookSpecificOutput"]
     assert output["permissionDecision"] == "allow"
     assert output["updatedInput"]["answers"] == {"Which name?": "quick"}
