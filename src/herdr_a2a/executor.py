@@ -46,6 +46,7 @@ class SessionExecutor(AgentExecutor):
                 )
             )
             session = await self._sessions.open(context_id)
+            session.release()
             # a later message waits, still submitted, for the turn before it to end
             await session.turn.acquire()
             session.task_id = task_id

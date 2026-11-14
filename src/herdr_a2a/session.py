@@ -14,6 +14,8 @@ from typing import Any
 # a flagged progress line reaches the person: a turn's first goes at once, as its ack, and the
 # rest come at most this often
 PROGRESS_INTERVAL = 20.0
+# the longest a task stays open for the session's background work after its turn ended, in seconds
+HOLD_LIMIT = 1800.0
 
 
 @dataclass
@@ -61,6 +63,9 @@ class Session:
     task_id: str | None = None
     asking: Question | None = None
     last_flagged: float = 0.0
+    # the last message of a turn that ended with background work in flight, its task still open
+    held: str | None = None
+    _hold_timer: asyncio.TimerHandle | None = None
 
     def progress(self, text: str, *, flagged: bool = False) -> None:
         if flagged and time.monotonic() - self.last_flagged < PROGRESS_INTERVAL:
@@ -80,7 +85,25 @@ class Session:
             self.asking = None
 
     def done(self, text: str) -> None:
+        if self._hold_timer is not None:
+            self._hold_timer.cancel()
+        self.held, self._hold_timer = None, None
         self.events.put_nowait(Done(text))
+
+    def hold(self, text: str) -> None:
+        """A turn ended while background work runs: its words are progress, and the task stays
+        open for the turns that work wakes, up to `HOLD_LIMIT`."""
+        self.last_flagged = 0.0
+        self.progress(text, flagged=True)
+        if self._hold_timer is not None:
+            self._hold_timer.cancel()
+        self.held = text
+        self._hold_timer = asyncio.get_running_loop().call_later(HOLD_LIMIT, self.done, text)
+
+    def release(self) -> None:
+        """Ends a held task with what it has, so a new message never waits behind it."""
+        if self.held is not None:
+            self.done(self.held)
 
     async def prompt(self, text: str) -> None:
         while not self.events.empty():

@@ -30,7 +30,8 @@ messages; the person cannot see your screen.
 unless asked.
 - Open each turn with one short sentence on what you will do; after it, speak only at a milestone.
 - Keep a turn to a few minutes: for a large request, do the first step, report it, and ask \
-whether to go on.
+whether to go on. Promise a later report only for a background task; for anything else you wait \
+on, such as another session's reply, say the person can ask again.
 - When a choice is the person's, ask with AskUserQuestion, with short options."""
 
 

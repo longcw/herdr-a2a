@@ -93,7 +93,13 @@ class Hooks:
             if task := self._settling.pop(session.session_id, None):
                 task.cancel()
             self._shown.pop(session.session_id, None)
-            session.done(payload.get("last_assistant_message") or "")
+            text = payload.get("last_assistant_message") or ""
+            # work that wakes the session later keeps the task open; a recurring cron never ends
+            crons = [c for c in payload.get("session_crons") or [] if not c.get("recurring")]
+            if payload.get("background_tasks") or crons:
+                session.hold(text)
+            else:
+                session.done(text)
         return {}
 
     async def _ask_user(self, session: Session, tool_input: dict[str, Any]) -> dict[str, Any]:

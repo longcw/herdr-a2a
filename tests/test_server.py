@@ -133,3 +133,37 @@ async def test_a_message_to_a_busy_session_waits_for_the_turn_before_it(herdr, c
     assert await prompted.get() == "two"
     await hook(client, sid, "Stop", last_assistant_message="did two")
     assert (await second)["artifacts"][0]["parts"][0]["text"] == "did two"
+
+
+BACKGROUND = [{"id": "b1", "type": "shell", "status": "running", "command": "make"}]
+
+
+async def test_a_turn_that_leaves_background_work_keeps_its_task_until_the_work_ends(herdr, client):
+    calls, prompted = herdr
+    sending = asyncio.create_task(send(client, "build it", context_id="c1"))
+    await prompted.get()
+    sid = session_id(calls)
+    await hook(client, sid, "Stop", last_assistant_message="Building.", background_tasks=BACKGROUND)
+    await asyncio.sleep(0.2)
+    assert not sending.done()
+
+    # the turn the finished build wakes answers the task
+    await hook(client, sid, "Stop", last_assistant_message="Built.", background_tasks=[])
+    task = await sending
+    assert task["artifacts"][0]["parts"][0]["text"] == "Built."
+    assert texts(task, flagged=True) == ["Building."]
+
+
+async def test_a_new_message_ends_a_held_task_with_its_last_message(herdr, client):
+    calls, prompted = herdr
+    first = asyncio.create_task(send(client, "build it", context_id="c1"))
+    await prompted.get()
+    sid = session_id(calls)
+    await hook(client, sid, "Stop", last_assistant_message="Building.", background_tasks=BACKGROUND)
+    await asyncio.sleep(0.2)
+
+    second = asyncio.create_task(send(client, "is it done?", context_id="c1"))
+    assert (await first)["artifacts"][0]["parts"][0]["text"] == "Building."
+    assert await prompted.get() == "is it done?"
+    await hook(client, sid, "Stop", last_assistant_message="Not yet.")
+    assert (await second)["artifacts"][0]["parts"][0]["text"] == "Not yet."
