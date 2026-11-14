@@ -1,0 +1,28 @@
+[project]
+name = "herdr-a2a"
+version = "0.1.0"
+description = "Serve interactive coding agent sessions, run in herdr, over the A2A protocol"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = [
+    "a2a-sdk[http-server]>=1.1,<2",
+    "uvicorn>=0.30",
+]
+
+[project.scripts]
+herdr-a2a = "herdr_a2a.server:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
