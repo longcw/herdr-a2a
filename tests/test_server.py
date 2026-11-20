@@ -10,14 +10,21 @@ from herdr_a2a import claude, server, session
 
 @pytest.fixture
 def herdr(monkeypatch):
-    """Fakes herdr: records each command, sets `prompted` on every prompt."""
+    """Fakes herdr: records each command, sets `prompted` on every prompt; agents live from start to tab close."""
     calls: list[tuple[str, ...]] = []
     prompted = asyncio.Queue()
+    alive: set[str] = set()
 
     async def fake(*args: str):
         calls.append(args)
         if args[:2] == ("agent", "get"):
-            raise RuntimeError("no such agent")
+            if args[2] not in alive:
+                raise RuntimeError("no such agent")
+            return {"result": {"agent": {"tab_id": "w1:t1"}}}
+        if args[:2] == ("agent", "start"):
+            alive.add(args[2])
+        if args[:2] == ("tab", "close"):
+            alive.clear()
         if args[:2] == ("workspace", "list"):
             return {"result": {"workspaces": []}}
         if args[:2] == ("workspace", "create"):
@@ -224,26 +231,8 @@ async def test_the_answer_carries_the_turn_usage_from_the_transcript(herdr, clie
     }
 
 
-async def test_an_idle_session_closes_its_tab_and_resumes_on_the_next_message(
-    tmp_path, monkeypatch
-):
-    calls = []
-
-    async def fake(*args):
-        calls.append(args)
-        if args[:2] == ("agent", "get"):
-            if any(c[:2] == ("tab", "close") for c in calls) or not any(
-                c[:2] == ("agent", "start") for c in calls
-            ):
-                raise RuntimeError("no such agent")
-            return {"result": {"agent": {"tab_id": "w1:t1"}}}
-        if args[:2] == ("workspace", "list"):
-            return {"result": {"workspaces": []}}
-        if args[:2] == ("workspace", "create"):
-            return {"result": {"tab": {"tab_id": "w1:t1"}, "root_pane": {"pane_id": "w1:p1"}}}
-        return {}
-
-    monkeypatch.setattr(session, "herdr", fake)
+async def test_an_idle_session_closes_its_tab_and_resumes_on_the_next_message(herdr, tmp_path):
+    calls, _ = herdr
     sessions = session.Sessions(
         kind="claude", cwd=tmp_path, agent_args=[], state=tmp_path / "s.json"
     )
@@ -257,22 +246,8 @@ async def test_an_idle_session_closes_its_tab_and_resumes_on_the_next_message(
     assert start[start.index("--resume") + 1] == first.session_id
 
 
-async def test_a_codex_session_is_bound_by_its_first_hook_and_resumed_by_that_id(
-    tmp_path, monkeypatch
-):
-    calls = []
-
-    async def fake(*args):
-        calls.append(args)
-        if args[:2] == ("agent", "get"):
-            raise RuntimeError("no such agent")
-        if args[:2] == ("workspace", "list"):
-            return {"result": {"workspaces": []}}
-        if args[:2] == ("workspace", "create"):
-            return {"result": {"tab": {"tab_id": "w1:t1"}, "root_pane": {"pane_id": "w1:p1"}}}
-        return {}
-
-    monkeypatch.setattr(session, "herdr", fake)
+async def test_a_codex_session_is_bound_by_its_first_hook_and_resumed_by_that_id(herdr, tmp_path):
+    calls, _ = herdr
     app = server.build_app(url="http://test", cwd=tmp_path, state=tmp_path / "s.json", kind="codex")
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
     sending = asyncio.create_task(send(client, "rank these", context_id="c1"))
@@ -287,6 +262,7 @@ async def test_a_codex_session_is_bound_by_its_first_hook_and_resumed_by_that_id
     assert (await sending)["status"]["state"] == "TASK_STATE_COMPLETED"
     assert json.loads((tmp_path / "s.json").read_text()) == {"c1": "cx1"}
 
+    await session.herdr("tab", "close", "w1:t1")
     resumed = session.Sessions(kind="codex", cwd=tmp_path, agent_args=[], state=tmp_path / "s.json")
     await resumed.open("c1")
     start_args = [c for c in calls if c[:2] == ("agent", "start")][-1]
@@ -322,3 +298,16 @@ def test_codex_turn_usage_is_the_difference_of_running_totals(tmp_path):
         "model": "gpt-5.6-luna",
         "rate_limits": {"primary": {"used_percent": 2.0}},
     }
+
+
+async def test_a_session_whose_tab_was_closed_by_hand_resumes_in_a_new_one(herdr, tmp_path):
+    calls, _ = herdr
+    sessions = session.Sessions(
+        kind="claude", cwd=tmp_path, agent_args=[], state=tmp_path / "s.json"
+    )
+    first = await sessions.open("c1")
+    assert await sessions.open("c1") is first
+    await session.herdr("tab", "close", "w1:t1")
+    second = await sessions.open("c1")
+    start = [c for c in calls if c[:2] == ("agent", "start")][-1]
+    assert second is not first and start[start.index("--resume") + 1] == first.session_id

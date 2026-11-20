@@ -174,7 +174,12 @@ class Sessions:
         """The context's session, started in a new herdr tab if it is not running."""
         async with self._opening.setdefault(context_id, asyncio.Lock()):
             if (session := self._live.get(context_id)) is not None:
-                return session
+                try:
+                    await herdr("agent", "get", session.name)
+                    return session
+                except RuntimeError:
+                    # its tab was closed by hand: resume the session in a new one
+                    del self._live[context_id]
             name = "a2a-" + hashlib.sha1(context_id.encode()).hexdigest()[:8]
             # Claude takes the id it is given; Codex picks its own, which SessionStart reports
             if (session_id := self._ids.get(context_id)) is not None:

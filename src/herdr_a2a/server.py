@@ -60,7 +60,13 @@ def build_app(
         # a home of its own, so the hooks and instructions never touch the person's ~/.codex
         home = state.parent / "codex-home"
         home.mkdir(exist_ok=True)
-        (home / "hooks.json").write_text(claude.codex_hooks(hook_url))
+        hooks = json.loads(claude.codex_hooks(hook_url))
+        # the person's own Codex hooks run too, so these sessions reach tools such as Moshi
+        own = Path.home() / ".codex" / "hooks.json"
+        if own.exists():
+            for event, groups in json.loads(own.read_text()).get("hooks", {}).items():
+                hooks["hooks"][event] = hooks["hooks"].get(event, []) + groups
+        (home / "hooks.json").write_text(json.dumps(hooks, indent=1))
         lines = ["features.hooks = true"]
         if instructions:
             # a JSON string is a valid TOML basic string
