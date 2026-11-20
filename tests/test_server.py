@@ -1,4 +1,5 @@
 import asyncio
+import json
 import uuid
 
 import httpx
@@ -167,3 +168,90 @@ async def test_a_new_message_ends_a_held_task_with_its_last_message(herdr, clien
     assert await prompted.get() == "is it done?"
     await hook(client, sid, "Stop", last_assistant_message="Not yet.")
     assert (await second)["artifacts"][0]["parts"][0]["text"] == "Not yet."
+
+
+async def test_the_answer_carries_the_turn_usage_from_the_transcript(herdr, client, tmp_path):
+    calls, prompted = herdr
+    sending = asyncio.create_task(send(client, "rank these", context_id="c1"))
+    await prompted.get()
+    rows = [
+        {"type": "user", "message": {"content": "earlier"}},
+        {"type": "assistant", "message": {"id": "m0", "usage": {"output_tokens": 99}}},
+        {"type": "user", "message": {"content": "rank these"}},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "model": "sonnet",
+                "usage": {"input_tokens": 5, "cache_read_input_tokens": 100, "output_tokens": 7},
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m1",
+                "model": "sonnet",
+                "usage": {"input_tokens": 5, "cache_read_input_tokens": 100, "output_tokens": 7},
+            },
+        },
+        {"type": "user", "message": {"content": [{"type": "tool_result"}]}},
+        {
+            "type": "assistant",
+            "message": {
+                "id": "m2",
+                "model": "sonnet",
+                "usage": {"input_tokens": 1, "output_tokens": 3},
+            },
+        },
+    ]
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("\n".join(json.dumps(r) for r in rows))
+    await hook(
+        client,
+        session_id(calls),
+        "Stop",
+        last_assistant_message="{}",
+        transcript_path=str(transcript),
+    )
+    usage = (await sending)["artifacts"][0]["metadata"]["usage"]
+    assert usage == {
+        "input_tokens": 6,
+        "cache_read_input_tokens": 100,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 10,
+        "calls": 2,
+        "model": "sonnet",
+    }
+
+
+async def test_an_idle_session_closes_its_tab_and_resumes_on_the_next_message(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    async def fake(*args):
+        calls.append(args)
+        if args[:2] == ("agent", "get"):
+            if any(c[:2] == ("tab", "close") for c in calls) or not any(
+                c[:2] == ("agent", "start") for c in calls
+            ):
+                raise RuntimeError("no such agent")
+            return {"result": {"agent": {"tab_id": "w1:t1"}}}
+        if args[:2] == ("workspace", "list"):
+            return {"result": {"workspaces": []}}
+        if args[:2] == ("workspace", "create"):
+            return {"result": {"tab": {"tab_id": "w1:t1"}, "root_pane": {"pane_id": "w1:p1"}}}
+        return {}
+
+    monkeypatch.setattr(session, "herdr", fake)
+    sessions = session.Sessions(
+        kind="claude", cwd=tmp_path, agent_args=[], state=tmp_path / "s.json"
+    )
+    first = await sessions.open("c1")
+    await sessions.close_idle(3600)
+    assert sessions.get("c1") is first
+    await sessions.close_idle(0)
+    assert sessions.get("c1") is None and ("tab", "close", "w1:t1") in calls
+    await sessions.open("c1")
+    start = [c for c in calls if c[:2] == ("agent", "start")][-1]
+    assert start[start.index("--resume") + 1] == first.session_id

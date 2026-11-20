@@ -36,6 +36,8 @@ class Question:
 @dataclass
 class Done:
     text: str
+    # the turn's tokens, when the transcript could be read
+    usage: dict[str, Any] | None = None
 
 
 Event = Progress | Question | Done
@@ -65,6 +67,7 @@ class Session:
     last_flagged: float = 0.0
     # the last message of a turn that ended with background work in flight, its task still open
     held: str | None = None
+    last_active: float = field(default_factory=time.monotonic)
     _hold_timer: asyncio.TimerHandle | None = None
 
     def progress(self, text: str, *, flagged: bool = False) -> None:
@@ -84,11 +87,12 @@ class Session:
         finally:
             self.asking = None
 
-    def done(self, text: str) -> None:
+    def done(self, text: str, usage: dict[str, Any] | None = None) -> None:
         if self._hold_timer is not None:
             self._hold_timer.cancel()
         self.held, self._hold_timer = None, None
-        self.events.put_nowait(Done(text))
+        self.last_active = time.monotonic()
+        self.events.put_nowait(Done(text, usage))
 
     def hold(self, text: str) -> None:
         """A turn ended while background work runs: its words are progress, and the task stays
@@ -109,6 +113,7 @@ class Session:
         while not self.events.empty():
             self.events.get_nowait()
         self.last_flagged = 0.0
+        self.last_active = time.monotonic()
         await herdr("agent", "prompt", self.name, text)
 
     async def interrupt(self) -> None:
@@ -169,6 +174,18 @@ class Sessions:
             self._state.parent.mkdir(parents=True, exist_ok=True)
             self._state.write_text(json.dumps(self._ids, indent=1))
             return session
+
+    async def close_idle(self, idle: float) -> None:
+        """Closes the tab of every session idle for `idle` seconds; its context resumes on the next message."""
+        for context_id, session in list(self._live.items()):
+            if session.turn.locked() or time.monotonic() - session.last_active < idle:
+                continue
+            del self._live[context_id]
+            try:
+                got = await herdr("agent", "get", session.name)
+                await herdr("tab", "close", got["result"]["agent"]["tab_id"])
+            except (RuntimeError, KeyError):
+                pass  # already gone
 
     async def _start(self, name: str, resume: list[str]) -> None:
         try:

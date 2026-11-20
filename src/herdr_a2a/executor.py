@@ -72,7 +72,10 @@ class SessionExecutor(AgentExecutor):
                     await updater.requires_input(updater.new_agent_message(parts))
                     return
                 elif isinstance(event, Done):
-                    await updater.add_artifact([Part(text=event.text)], name="answer")
+                    metadata = {"usage": event.usage} if event.usage else None
+                    await updater.add_artifact(
+                        [Part(text=event.text)], name="answer", metadata=metadata
+                    )
                     session.end_turn()
                     await updater.complete()
                     return

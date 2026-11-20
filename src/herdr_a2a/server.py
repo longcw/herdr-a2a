@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import contextlib
 from pathlib import Path
 
 import uvicorn
@@ -45,6 +47,7 @@ def build_app(
     instructions: str = INSTRUCTIONS,
     agent_args: list[str] | None = None,
     workspace: str = "a2a-server",
+    close_idle: float = 0,
 ) -> Starlette:
     # files, not arguments: herdr refuses arguments it cannot quote for the shell
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -81,12 +84,25 @@ def build_app(
     async def hook(request: Request) -> JSONResponse:
         return JSONResponse(await hooks.handle(await request.json()))
 
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: Starlette):
+        async def sweep() -> None:
+            while True:
+                await asyncio.sleep(min(close_idle, 60))
+                await sessions.close_idle(close_idle)
+
+        task = asyncio.create_task(sweep()) if close_idle > 0 else None
+        yield
+        if task is not None:
+            task.cancel()
+
     return Starlette(
+        lifespan=lifespan,
         routes=[
             *create_agent_card_routes(card),
             *create_jsonrpc_routes(handler, rpc_url="/"),
             Route(HOOK_PATH, hook, methods=["POST"]),
-        ]
+        ],
     )
 
 
@@ -106,6 +122,12 @@ def main() -> None:
     parser.add_argument(
         "--workspace", default="a2a-server", help="the herdr workspace the sessions open in"
     )
+    parser.add_argument(
+        "--close-idle",
+        type=float,
+        default=0,
+        help="close a session's tab after this many idle seconds; its context resumes later",
+    )
     parser.add_argument("--state", type=Path, default=Path.home() / ".herdr-a2a" / "sessions.json")
     parser.add_argument("agent_args", nargs="*", help="extra arguments for claude, after --")
     ns = parser.parse_args()
@@ -119,6 +141,7 @@ def main() -> None:
         instructions=ns.instructions.read_text().strip() if ns.instructions else INSTRUCTIONS,
         agent_args=ns.agent_args,
         workspace=ns.workspace,
+        close_idle=ns.close_idle,
     )
     uvicorn.run(app, host=ns.host, port=ns.port)
 

@@ -28,6 +28,46 @@ def settings(url: str) -> str:
     return json.dumps({"hooks": asks | notes}, indent=1)
 
 
+def turn_usage(transcript: str) -> dict[str, Any] | None:
+    """Tokens the last turn used, summed over its API calls, from the session's transcript."""
+    try:
+        with open(transcript) as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError):
+        return None
+    # the turn starts at the person's prompt; tool results are user entries too
+    start = max(
+        (
+            i
+            for i, r in enumerate(rows)
+            if r.get("type") == "user"
+            and not r.get("isMeta")
+            and r.get("toolUseResult") is None
+            and not any(
+                isinstance(c, dict) and c.get("type") == "tool_result"
+                for c in (r.get("message") or {}).get("content") or []
+            )
+        ),
+        default=-1,
+    )
+    # one API call can span several entries that repeat its usage
+    calls: dict[str, dict[str, Any]] = {}
+    for r in rows[start + 1 :]:
+        message = r.get("message") or {}
+        if r.get("type") == "assistant" and message.get("usage"):
+            calls[message.get("id") or str(len(calls))] = message
+    if not calls:
+        return None
+    keys = (
+        "input_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
+        "output_tokens",
+    )
+    usage: dict[str, Any] = {k: sum(m["usage"].get(k) or 0 for m in calls.values()) for k in keys}
+    return usage | {"calls": len(calls), "model": next(reversed(calls.values())).get("model", "")}
+
+
 def describe(tool: str, tool_input: dict[str, Any]) -> str:
     """One short line for a tool call."""
     detail = (
@@ -99,7 +139,7 @@ class Hooks:
             if payload.get("background_tasks") or crons:
                 session.hold(text)
             else:
-                session.done(text)
+                session.done(text, turn_usage(payload.get("transcript_path") or ""))
         return {}
 
     async def _ask_user(self, session: Session, tool_input: dict[str, Any]) -> dict[str, Any]:

@@ -24,6 +24,7 @@ A caller that shows only flagged progress, such as a voice agent, hears a line w
 - A turn that ends with background work in flight, such as a background shell, a subagent or a scheduled wakeup, keeps its task open: the turns that work wakes continue it, and the first turn with nothing in flight answers it. A new message, or 30 minutes, ends it with its last message.
 - A session wakes for other things too, such as a reply from another session. Those turns have no task and reach no one, so the instructions tell Claude to say the person can ask again.
 - Cancel sends Escape to the session and denies any question it waits on.
+- The answer artifact's metadata carries the turn's `usage`: input, cache read, cache write and output tokens summed over its API calls, read from the session's transcript.
 
 The context to session id map is saved in `~/.herdr-a2a/sessions.json`, so a context continues its session after a restart.
 
@@ -35,7 +36,7 @@ With herdr running:
 uv run herdr-a2a --cwd ~/code/my-project
 ```
 
-The server listens on `http://127.0.0.1:8790`, and the agent card is at `/.well-known/agent-card.json`. Arguments after `--` go to `claude`, such as `-- --model opus`.
+The server listens on `http://127.0.0.1:8790`, and the agent card is at `/.well-known/agent-card.json`. Arguments after `--` go to `claude`, such as `-- --model opus`. `--close-idle <seconds>` closes the tab of a session idle that long; its context resumes the same session on its next message.
 
 ## Instructions
 
