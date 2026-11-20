@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -138,15 +139,33 @@ class Sessions:
         agent_args: list[str],
         state: Path,
         workspace: str = "a2a-server",
+        env: dict[str, str] | None = None,
     ) -> None:
         self._kind, self._cwd, self._args, self._workspace = kind, cwd, agent_args, workspace
+        self._env = env or {}
         self._state = state
         self._ids: dict[str, str] = json.loads(state.read_text()) if state.exists() else {}
         self._live: dict[str, Session] = {}
         self._opening: dict[str, asyncio.Lock] = {}
 
     def by_session_id(self, session_id: str) -> Session | None:
+        if not session_id:
+            return None
         return next((s for s in self._live.values() if s.session_id == session_id), None)
+
+    def by_name(self, name: str) -> Session | None:
+        return next((s for s in self._live.values() if s.name == name), None)
+
+    def bind(self, session: Session, session_id: str) -> None:
+        """Records the id an agent chose for itself, so its context resumes it."""
+        if session_id and session.session_id != session_id:
+            session.session_id = session_id
+            self._ids[session.context_id] = session_id
+            self._save()
+
+    def _save(self) -> None:
+        self._state.parent.mkdir(parents=True, exist_ok=True)
+        self._state.write_text(json.dumps(self._ids, indent=1))
 
     def get(self, context_id: str) -> Session | None:
         return self._live.get(context_id)
@@ -157,8 +176,13 @@ class Sessions:
             if (session := self._live.get(context_id)) is not None:
                 return session
             name = "a2a-" + hashlib.sha1(context_id.encode()).hexdigest()[:8]
+            # Claude takes the id it is given; Codex picks its own, which SessionStart reports
             if (session_id := self._ids.get(context_id)) is not None:
-                resume = ["--resume", session_id]
+                resume = (
+                    ["resume", session_id] if self._kind == "codex" else ["--resume", session_id]
+                )
+            elif self._kind == "codex":
+                session_id, resume = "", []
             else:
                 session_id = str(uuid.uuid4())
                 resume = ["--session-id", session_id]
@@ -170,9 +194,9 @@ class Sessions:
             except BaseException:
                 del self._live[context_id]
                 raise
-            self._ids[context_id] = session_id
-            self._state.parent.mkdir(parents=True, exist_ok=True)
-            self._state.write_text(json.dumps(self._ids, indent=1))
+            if session.session_id:
+                self._ids[context_id] = session.session_id
+                self._save()
             return session
 
     async def close_idle(self, idle: float) -> None:
@@ -194,6 +218,9 @@ class Sessions:
         except RuntimeError:
             pass
         cwd = str(self._cwd)
+        # the server's PATH, not the herdr server's, which may hold another terminal's wrappers
+        tagged = {"PATH": os.environ.get("PATH", ""), **self._env, "HERDR_A2A_SESSION": name}
+        env = [f for k, v in tagged.items() for f in ("--env", f"{k}={v}")]
         listed = await herdr("workspace", "list")
         workspace = next(
             (
@@ -206,7 +233,7 @@ class Sessions:
         if workspace is None:
             # a new workspace's first tab hosts this session
             made = await herdr(
-                "workspace", "create", "--cwd", cwd, "--label", self._workspace, "--no-focus"
+                "workspace", "create", "--cwd", cwd, "--label", self._workspace, "--no-focus", *env
             )
             await herdr("tab", "rename", made["result"]["tab"]["tab_id"], name)
         else:
@@ -220,6 +247,7 @@ class Sessions:
                 "--label",
                 name,
                 "--no-focus",
+                *env,
             )
         pane = made["result"]["root_pane"]["pane_id"]
         try:

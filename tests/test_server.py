@@ -255,3 +255,70 @@ async def test_an_idle_session_closes_its_tab_and_resumes_on_the_next_message(
     await sessions.open("c1")
     start = [c for c in calls if c[:2] == ("agent", "start")][-1]
     assert start[start.index("--resume") + 1] == first.session_id
+
+
+async def test_a_codex_session_is_bound_by_its_first_hook_and_resumed_by_that_id(
+    tmp_path, monkeypatch
+):
+    calls = []
+
+    async def fake(*args):
+        calls.append(args)
+        if args[:2] == ("agent", "get"):
+            raise RuntimeError("no such agent")
+        if args[:2] == ("workspace", "list"):
+            return {"result": {"workspaces": []}}
+        if args[:2] == ("workspace", "create"):
+            return {"result": {"tab": {"tab_id": "w1:t1"}, "root_pane": {"pane_id": "w1:p1"}}}
+        return {}
+
+    monkeypatch.setattr(session, "herdr", fake)
+    app = server.build_app(url="http://test", cwd=tmp_path, state=tmp_path / "s.json", kind="codex")
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+    sending = asyncio.create_task(send(client, "rank these", context_id="c1"))
+    await asyncio.sleep(0.2)
+    create = next(c for c in calls if c[:2] == ("workspace", "create"))
+    name = next(a.split("=", 1)[1] for a in create if a.startswith("HERDR_A2A_SESSION="))
+    assert any(a.startswith("CODEX_HOME=") for a in create)
+
+    start = {"session_id": "cx1", "hook_event_name": "SessionStart"}
+    await client.post(f"/hooks/codex?session={name}", json=start)
+    await hook(client, "cx1", "Stop", last_assistant_message="{}")
+    assert (await sending)["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert json.loads((tmp_path / "s.json").read_text()) == {"c1": "cx1"}
+
+    resumed = session.Sessions(kind="codex", cwd=tmp_path, agent_args=[], state=tmp_path / "s.json")
+    await resumed.open("c1")
+    start_args = [c for c in calls if c[:2] == ("agent", "start")][-1]
+    assert start_args[start_args.index("--") + 1 : start_args.index("--") + 3] == ("resume", "cx1")
+
+
+def test_codex_turn_usage_is_the_difference_of_running_totals(tmp_path):
+    def count(total, used=None):
+        info = {"total_token_usage": total}
+        return {
+            "type": "event_msg",
+            "payload": {"type": "token_count", "info": info, "rate_limits": used},
+        }
+
+    rows = [
+        count({"input_tokens": 100, "cached_input_tokens": 50, "output_tokens": 10}),
+        {"type": "event_msg", "payload": {"type": "task_started"}},
+        {"type": "turn_context", "payload": {"model": "gpt-5.6-luna"}},
+        count({"input_tokens": 300, "cached_input_tokens": 200, "output_tokens": 30}),
+        count(
+            {"input_tokens": 500, "cached_input_tokens": 350, "output_tokens": 45},
+            {"primary": {"used_percent": 2.0}},
+        ),
+    ]
+    transcript = tmp_path / "rollout.jsonl"
+    transcript.write_text("\n".join(json.dumps(r) for r in rows))
+    assert claude.turn_usage(str(transcript)) == {
+        "input_tokens": 100,
+        "cache_read_input_tokens": 300,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 35,
+        "calls": 2,
+        "model": "gpt-5.6-luna",
+        "rate_limits": {"primary": {"used_percent": 2.0}},
+    }

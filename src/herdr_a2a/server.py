@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 from pathlib import Path
 
 import uvicorn
@@ -22,7 +23,7 @@ from . import claude
 from .executor import SessionExecutor
 from .session import Sessions
 
-HOOK_PATH = "/hooks/claude"
+HOOK_PATH = "/hooks/{kind}"
 
 # appended to the agent's system prompt, so it holds on every turn and after a resume
 INSTRUCTIONS = """\
@@ -48,18 +49,40 @@ def build_app(
     agent_args: list[str] | None = None,
     workspace: str = "a2a-server",
     close_idle: float = 0,
+    kind: str = "claude",
+    codex_config: str = "",
 ) -> Starlette:
     # files, not arguments: herdr refuses arguments it cannot quote for the shell
     state.parent.mkdir(parents=True, exist_ok=True)
-    hooks_file = state.parent / "claude-settings.json"
-    hooks_file.write_text(claude.settings(url.rstrip("/") + HOOK_PATH))
-    args = ["--settings", str(hooks_file)]
-    if instructions:
-        instructions_file = state.parent / "instructions.md"
-        instructions_file.write_text(instructions)
-        args += ["--append-system-prompt-file", str(instructions_file)]
+    hook_url = url.rstrip("/") + HOOK_PATH.format(kind=kind)
+    env: dict[str, str] = {}
+    if kind == "codex":
+        # a home of its own, so the hooks and instructions never touch the person's ~/.codex
+        home = state.parent / "codex-home"
+        home.mkdir(exist_ok=True)
+        (home / "hooks.json").write_text(claude.codex_hooks(hook_url))
+        lines = ["features.hooks = true"]
+        if instructions:
+            # a JSON string is a valid TOML basic string
+            lines.insert(0, f"developer_instructions = {json.dumps(instructions)}")
+        (home / "config.toml").write_text("\n".join(lines) + "\n" + codex_config)
+        auth = home / "auth.json"
+        if not auth.exists():
+            auth.symlink_to(Path.home() / ".codex" / "auth.json")
+        env["CODEX_HOME"] = str(home)
+        args = ["--dangerously-bypass-hook-trust"]
+    else:
+        hooks_file = state.parent / "claude-settings.json"
+        hooks_file.write_text(claude.settings(hook_url))
+        args = ["--settings", str(hooks_file)]
+        if instructions:
+            instructions_file = state.parent / "instructions.md"
+            instructions_file.write_text(instructions)
+            args += ["--append-system-prompt-file", str(instructions_file)]
     args += agent_args or []
-    sessions = Sessions(kind="claude", cwd=cwd, agent_args=args, state=state, workspace=workspace)
+    sessions = Sessions(
+        kind=kind, cwd=cwd, agent_args=args, state=state, workspace=workspace, env=env
+    )
     hooks = claude.Hooks(sessions)
     card = AgentCard(
         name=name,
@@ -82,7 +105,8 @@ def build_app(
     )
 
     async def hook(request: Request) -> JSONResponse:
-        return JSONResponse(await hooks.handle(await request.json()))
+        payload = await request.json()
+        return JSONResponse(await hooks.handle(payload, request.query_params.get("session")))
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: Starlette):
@@ -108,6 +132,12 @@ def build_app(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--kind", choices=["claude", "codex"], default="claude")
+    parser.add_argument(
+        "--codex-config",
+        type=Path,
+        help="TOML appended to the Codex sessions' config.toml, such as a model or permission profile",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8790)
     parser.add_argument("--url", help="the URL callers reach this server at")
@@ -142,6 +172,8 @@ def main() -> None:
         agent_args=ns.agent_args,
         workspace=ns.workspace,
         close_idle=ns.close_idle,
+        kind=ns.kind,
+        codex_config=ns.codex_config.read_text() if ns.codex_config else "",
     )
     uvicorn.run(app, host=ns.host, port=ns.port)
 
