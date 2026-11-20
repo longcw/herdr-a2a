@@ -311,3 +311,16 @@ async def test_a_session_whose_tab_was_closed_by_hand_resumes_in_a_new_one(herdr
     second = await sessions.open("c1")
     start = [c for c in calls if c[:2] == ("agent", "start")][-1]
     assert second is not first and start[start.index("--resume") + 1] == first.session_id
+
+
+async def test_a_new_session_over_the_limit_closes_the_least_recently_active_tab(herdr, tmp_path):
+    calls, _ = herdr
+    sessions = session.Sessions(
+        kind="claude", cwd=tmp_path, agent_args=[], state=tmp_path / "s.json", max_sessions=1
+    )
+    yesterday = await sessions.open("day-1")
+    await sessions.open("day-2")
+    assert sessions.get("day-1") is None and sessions.get("day-2") is not None
+    assert ("tab", "close", "w1:t1") in calls
+    # the closed context can still resume
+    assert yesterday.session_id in (tmp_path / "s.json").read_text()

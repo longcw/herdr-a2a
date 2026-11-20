@@ -140,9 +140,10 @@ class Sessions:
         state: Path,
         workspace: str = "a2a-server",
         env: dict[str, str] | None = None,
+        max_sessions: int = 0,
     ) -> None:
         self._kind, self._cwd, self._args, self._workspace = kind, cwd, agent_args, workspace
-        self._env = env or {}
+        self._env, self._max = env or {}, max_sessions
         self._state = state
         self._ids: dict[str, str] = json.loads(state.read_text()) if state.exists() else {}
         self._live: dict[str, Session] = {}
@@ -202,19 +203,27 @@ class Sessions:
             if session.session_id:
                 self._ids[context_id] = session.session_id
                 self._save()
+            # over the limit, the least recently active idle sessions give way to the new one
+            if self._max:
+                idle = [s for s in self._live.values() if s is not session and not s.turn.locked()]
+                for old in sorted(idle, key=lambda s: s.last_active)[: len(self._live) - self._max]:
+                    await self._close(old)
             return session
 
     async def close_idle(self, idle: float) -> None:
         """Closes the tab of every session idle for `idle` seconds; its context resumes on the next message."""
-        for context_id, session in list(self._live.items()):
-            if session.turn.locked() or time.monotonic() - session.last_active < idle:
-                continue
-            del self._live[context_id]
-            try:
-                got = await herdr("agent", "get", session.name)
-                await herdr("tab", "close", got["result"]["agent"]["tab_id"])
-            except (RuntimeError, KeyError):
-                pass  # already gone
+        for session in list(self._live.values()):
+            if not session.turn.locked() and time.monotonic() - session.last_active >= idle:
+                await self._close(session)
+
+    async def _close(self, session: Session) -> None:
+        """Closes a session's tab; its context resumes it on the next message."""
+        self._live.pop(session.context_id, None)
+        try:
+            got = await herdr("agent", "get", session.name)
+            await herdr("tab", "close", got["result"]["agent"]["tab_id"])
+        except (RuntimeError, KeyError):
+            pass  # already gone
 
     async def _start(self, name: str, resume: list[str]) -> None:
         try:

@@ -51,6 +51,7 @@ def build_app(
     close_idle: float = 0,
     kind: str = "claude",
     codex_config: str = "",
+    max_sessions: int = 0,
 ) -> Starlette:
     # files, not arguments: herdr refuses arguments it cannot quote for the shell
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -87,7 +88,13 @@ def build_app(
             args += ["--append-system-prompt-file", str(instructions_file)]
     args += agent_args or []
     sessions = Sessions(
-        kind=kind, cwd=cwd, agent_args=args, state=state, workspace=workspace, env=env
+        kind=kind,
+        cwd=cwd,
+        agent_args=args,
+        state=state,
+        workspace=workspace,
+        env=env,
+        max_sessions=max_sessions,
     )
     hooks = claude.Hooks(sessions)
     card = AgentCard(
@@ -164,6 +171,12 @@ def main() -> None:
         default=0,
         help="close a session's tab after this many idle seconds; its context resumes later",
     )
+    parser.add_argument(
+        "--max-sessions",
+        type=int,
+        default=0,
+        help="keep at most this many sessions open; a new one closes the least recently active idle tab",
+    )
     parser.add_argument("--state", type=Path, default=Path.home() / ".herdr-a2a" / "sessions.json")
     parser.add_argument("agent_args", nargs="*", help="extra arguments for claude, after --")
     ns = parser.parse_args()
@@ -180,6 +193,7 @@ def main() -> None:
         close_idle=ns.close_idle,
         kind=ns.kind,
         codex_config=ns.codex_config.read_text() if ns.codex_config else "",
+        max_sessions=ns.max_sessions,
     )
     uvicorn.run(app, host=ns.host, port=ns.port)
 

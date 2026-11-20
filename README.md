@@ -42,7 +42,7 @@ With herdr running:
 uv run herdr-a2a --cwd ~/code/my-project
 ```
 
-The server listens on `http://127.0.0.1:8790`, and the agent card is at `/.well-known/agent-card.json`. Arguments after `--` go to `claude`, such as `-- --model opus`. `--close-idle <seconds>` closes the tab of a session idle that long; its context resumes the same session on its next message.
+The server listens on `http://127.0.0.1:8790`, and the agent card is at `/.well-known/agent-card.json`. Arguments after `--` go to `claude`, such as `-- --model opus`. `--close-idle <seconds>` closes the tab of a session idle that long; its context resumes the same session on its next message. `--max-sessions <n>` keeps at most n sessions open: a new one closes the least recently active idle tab, which also resumes when its context is messaged again.
 
 ## Instructions
 
